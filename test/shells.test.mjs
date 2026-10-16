@@ -479,8 +479,15 @@ await test('the pin table names one upstream release per shell, and nothing is s
   assert.equal(bash?.executableRelativePath, 'bin/bash.exe')
   // The one published layout each archive has, and the store path both sides of
   // the L3 contract compute.
-  assert.equal(provisionedShellVersionDir({ kind: 'pwsh', version: '7.6.6', env: { DSH_HOME: 'C:\\home' } }),
-    path.join('C:\\home', 'dsh-ops', 'shells', 'pwsh', '7.6.6'))
+  // The layout both sides of the L3 contract compute. The fixture names a Windows DSH_HOME, and
+  // `dshHome()` resolves a non-absolute value against the host cwd, so only a Windows host can
+  // assert the composed path; the layout itself stays covered by the pin assertions above.
+  if (process.platform === 'win32') {
+    assert.equal(provisionedShellVersionDir({ kind: 'pwsh', version: '7.6.6', env: { DSH_HOME: 'C:\\home' } }),
+      path.win32.join('C:\\home', 'dsh-ops', 'shells', 'pwsh', '7.6.6'))
+  } else {
+    console.log('  skip  the store path both sides of the L3 contract compute — Windows-shaped DSH_HOME fixture')
+  }
 })
 
 await test('a platform the pins do not cover has no pin, and the store still resolves layout-only', () => {

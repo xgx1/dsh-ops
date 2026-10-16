@@ -245,7 +245,12 @@ await test('file/background share runtime, but command tools never leak into glo
   try {
     await executor(ctx)
     const file = await fileMount(ctx)
-    const background = await component(ctx, 'background')
+    const background = await component(ctx, 'background', {
+      // The background command tools need a resolvable bash rung. Windows CI has the bundled
+      // payload; another host names the host's own bash, because `allowSystemShellFallback` is
+      // retired by config update 1 and must not be used as a fixture knob.
+      ...(process.platform === 'win32' ? {} : { bashPath: '/bin/bash' }),
+    })
     const full = await agent(ctx, 'background-full')
     const jobs = BACKGROUND_TOOLS.map(publicToolName)
     await visible(ctx, full, jobs)
