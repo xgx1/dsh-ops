@@ -208,8 +208,8 @@ try {
   fs.copyFileSync('package.json',path.join(isolatedPackage,'package.json'))
   const runtimeDir = path.resolve('runtime',`${process.platform}-${process.arch}`)
   fs.cpSync(runtimeDir,path.join(isolatedPackage,'runtime',`${process.platform}-${process.arch}`),{recursive:true})
-  assert.throws(() => resolveWorker({}, {platform:'linux',arch:'x64'}), /Windows x64 only/)
-  assert.throws(() => resolveWorker({}, {platform:'win32',arch:'arm64'}), /Windows x64 only/)
+  assert.throws(() => resolveWorker({}, {platform:'darwin',arch:'arm64'}), /supports Windows x64 and Linux x64/)
+  assert.throws(() => resolveWorker({}, {platform:'win32',arch:'arm64'}), /supports Windows x64 and Linux x64/)
   assert.ok(resolveWorker({}, {packageRoot:isolatedPackage}).startsWith(isolatedPackage))
   console.log('ok: installed runtime resolves without binaryPath or source build tree')
   const real = new Context(); real.logger.level = 0

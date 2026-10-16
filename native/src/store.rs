@@ -16,9 +16,12 @@ pub struct Store {
     pub dir: Dir,
     _lock: std::fs::File,
     read_only: bool,
+    /// Host path of the store directory; the durability step reopens it by path.
+    #[cfg(unix)]
+    path: std::path::PathBuf,
 }
 impl Store {
-    pub fn open(root: &Dir, read_only: bool) -> Result<Self> {
+    pub fn open(root: &Dir, path: std::path::PathBuf, read_only: bool) -> Result<Self> {
         if !read_only {
             match root.create_dir(STORE) {
                 Ok(()) => (),
@@ -44,6 +47,8 @@ impl Store {
             dir,
             _lock: lock,
             read_only,
+            #[cfg(unix)]
+            path,
         })
     }
     pub fn validate_id(id: &str) -> Result<()> {
@@ -146,7 +151,7 @@ impl Store {
             .rename(&temporary, &self.dir, format!("{id}.{generation:06}.json"))?;
         // Persist directory entries where the platform supports directory fsync.
         #[cfg(unix)]
-        self.dir.try_clone()?.into_std_file().sync_all()?;
+        crate::paths::sync_dir(&self.path)?;
         Ok(())
     }
     pub fn release(&self, id: &str) -> Result<()> {

@@ -127,6 +127,17 @@ fn read_options() -> OpenOptions {
     o.read(true).follow(FollowSymlinks::No);
     o
 }
+/// Persist a directory's entries after a rename.
+///
+/// Every handle this worker holds for a directory is opened by cap-std, which
+/// uses `O_PATH` on Linux. `fsync` on an `O_PATH` descriptor is `EBADF` there,
+/// so the durability step reopens the same directory through its host path —
+/// an operation the caller has already authorized and canonicalized.
+#[cfg(unix)]
+pub fn sync_dir(path: &Path) -> Result<()> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
 #[derive(Default)]
 pub struct Snapshot {
     pub revision: String,
