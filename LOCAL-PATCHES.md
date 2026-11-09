@@ -1,51 +1,35 @@
 # Local patches in this fork (`xgx1/dsh-ops`)
 
-Upstream `T-Auto/dsh-ops` 0.3.0 is Windows x64 only. This fork adds Linux x64 so all four
-components run on the author's Arch Linux DSH deployment. Keep this list current so
-`git merge upstream/main` can be re-applied knowingly.
+**There are none as of upstream 0.5.1.** This fork used to carry a Linux x64 port of 0.3.0 for the
+file and PTC components; upstream implemented all of it itself, so `main` is now upstream `main`
+plus this file. Re-add an entry here only for something upstream still gets wrong.
 
-## Platform gates
+## Where the old patches went (0.3.0 fork → 0.5.1 upstream)
 
-| File | Change | Why |
-| --- | --- | --- |
-| `package.json`, `package-lock.json` | `os` gains `linux` | Otherwise the package manager refuses to install (npm `notsup Actual cpu: x64`). |
-| `lib/ptc/runtime.js` | `PLATFORMS` gains `linux-x64`; refusal text updated | Hard gate in `resolveWorker`; also drives `bin/native-runtime.mjs stage`, which validates the ELF header and writes `runtime/linux-x64/provenance.json`. |
-| `dsh-plugin.json` | `dsh-ops-ptc` `platforms` gains `linux` | Marketplace/descriptor honesty only; DSH itself does not read this field. |
-
-## Linux runtime bug
-
-| File | Change | Why |
-| --- | --- | --- |
-| `native/src/paths.rs` | new `sync_dir()` | cap-std opens directories with `O_PATH` on Linux; `fsync` on such a descriptor is `EBADF`, which broke every `ops_batch` and `ops_replace` with `IO_ERROR Bad file descriptor (os error 9)`. |
-| `native/src/store.rs`, `native/src/file.rs`, `native/src/lib.rs` | call `sync_dir()` with the host path instead of `dir.try_clone()?.into_std_file().sync_all()` | Root-cause fix for the above, at both durability sites. |
-| `lib/workspace-preparation.js` | the Windows interpreter path uses `path.win32.join` | The spec always names `powershell.exe`; a POSIX `path.join` produced `C:\Windows/System32/...` and made the spawn-spec assertion host-dependent. Same convention as the Windows resolver in `shells.js`. |
-
-## Test portability (so `node test/run.mjs` is green on Linux)
-
-| File | Change |
+| Old patch | Upstream equivalent |
 | --- | --- |
-| `test/ptc.test.mjs` | The "unsupported platform" fixture now uses `darwin`/`arm64` and the new refusal text; the old one asserted that `linux-x64` is rejected. |
-| `test/binary.test.mjs` | Seeds the managed copy under the fixture's platform (`FORGED.platform`), so the search-order check no longer mixes a Linux seed with a `fastctx.exe` lookup. |
-| `test/permissions.test.mjs` | The three structured `permission.code === 'POLICY_DENIED'` assertions tolerate an absent `permission` object: Windows' sandbox reports a structured denial, a POSIX sandbox denies in the kernel (read-only filesystem). The effect assertions (non-zero exit, no file written) stay unconditional. |
-| `test/mount.test.mjs` | The background scenario names `bashPath: /bin/bash` on non-Windows hosts. `allowSystemShellFallback` is retired by config update 1, so it must not be used as a fixture knob. |
-| `test/shells.test.mjs` | The Windows-shaped `DSH_HOME` store-path assertion is Windows-only; `dshHome()` resolves a non-absolute value against the host cwd, so only a Windows host can assert the composed path. |
+| `package.json` / `package-lock.json` `os` gains `linux` | `"os": ["win32", "linux", "darwin"]` |
+| `lib/ptc/runtime.js` `PLATFORMS` gains `linux-x64` | `src/execution/runtime.ts`: `['win32-x64', 'linux-x64', 'darwin-arm64', 'darwin-x64']` |
+| `dsh-plugin.json` `dsh-ops-ptc` `platforms` gains `linux` | `platforms: ["win32", "linux", "darwin"]`, `targets` names the four arch pairs |
+| `native/src/paths.rs` `sync_dir()`: reopen the directory by host path, because cap-std's `O_PATH` descriptor fails `fsync` with `EBADF` on Linux | `native/crates/ops-files/src/lib.rs` `sync_directory(&Dir)`: tries `sync_all()`, on failure reopens the same handle through `/proc/self/fd/<n>` — same bug, tighter fix (no host-path reopen, so no TOCTOU window) |
+| `native/src/store.rs`, `native/src/file.rs` durability call sites | `native/crates/ops-results/src/store.rs`, `native/crates/ops-files/src/file*.rs` |
+| `lib/workspace-preparation.js`: the PowerShell interpreter path uses `path.win32.join` | Not needed: `test/permissions.test.mjs` now asserts only the host-relative tail off Windows |
+| Five test-portability edits (`test/{ptc,binary,permissions,mount,shells}.test.mjs`) | Suites are written against all three platforms; the Linux/macOS gate sets `DSH_OPS_REQUIRE_RUNTIME=1`, so a missing worker fails instead of skipping |
 
-The five `provision-shells` / `ladder` checks self-skip: the pin table covers `win32-x64`,
-and this fork does not add a Linux shell payload (see below).
-
-## Building on Linux
+## Building and running on this machine (Linux x64)
 
 ```console
-npm run build:ptc                     # native Rust worker -> runtime/linux-x64
-node bin/dsh-ops.mjs build --force    # vendored FastCtx -> vendor/fastctx/target/release/fastctx
+npm ci
+npm run build            # src/ -> lib/
+npm run build:ptc        # native worker -> runtime/linux-x64 (cargo, ~30 s warm)
+npm run build:bash-ipc   # Windows x64 only by design; refuses to run here
+npm run validate:manifest
+npm test                 # node test/run.mjs
+npm run test:ptc         # node test/run.mjs ptc
 ```
 
-## Running on Linux
-
-- `shell`: point `bashPath` at the host's bash (`/usr/bin/bash`). There is no Linux shell
-  payload to provision, and `allowSystemShellFallback` is not an operator switch — config
-  update 1 forces it back to `false`.
-- `background`: each row resolves its **own** shell, so the background row needs the same
-  `bashPath`; without it its bash rung is unresolved and it publishes no command tools.
-  Command tools additionally require an authoritative `danger-full-access` session.
-- `file` and `ptc` need no shell configuration.
+- `lib/` and `runtime/` are gitignored: they are build output, never committed.
+- `shell` and `background` on Linux run the host's own bash, so `bashPath` must point at it
+  (`/usr/bin/bash`); the bundled PowerShell 7 and the Bash IPC proxies stay Windows x64 only.
+- Merging upstream again: `git merge --no-ff --no-commit upstream/main`, and resolve every conflict
+  to upstream.

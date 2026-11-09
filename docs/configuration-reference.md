@@ -1,100 +1,188 @@
 # Configuration reference
 
-Every configuration key, and **which component row owns it**.
+English | [中文](配置参考.md)
 
----
+OPS ships **one `dsh-ops` row**, following the single-row plugin-page model. Built-in and explicitly
+configured custom presets share one consumer assembler. Installation does not opt unknown presets in.
+Plugin authors can also mount the [public integration API](integration-api.md) independently.
 
-## Where configuration lives
+## Single-row switches
 
-In DSH's configuration editor, find the corresponding `dsh-ops/shell`, `dsh-ops/file`, `dsh-ops/background` or `dsh-ops/ptc` row, adjust `config`, then save; unknown configuration keys cause errors naming the key.
+| Section | Defaults and behavior |
+| --- | --- |
+| `global` | `bash`, `hidePwsh`, `hideOfficialTools`, `dynamicTools` all true; each gates the corresponding row-managed consumer choice |
+| `minimal` | Enabled; no resident file surface; optional Bash and dynamic selection |
+| `standard`, `cordis` | Enabled; resident Native reader/search/pager profile, optional Bash, replacement and discovery |
+| `ptc` | Enabled; typed resident APIs and progressive SDK loading under actual host PTC presentation |
+| `presets` | Empty by default; map of exact preset ids to explicit consumer options |
+| `discovery` | Enabled; default built-in Native pool, maxResults 3, no always-loaded selections |
+| `panel`, `tui` | Disabled by default; opt-in capture and read-only sidebar |
+| `resultCache` | Enabled; sweeps idle result-cache roots at start-up and after the last owner unloads. `maxRoots`/`maxTotalBytes` default 0 (report only), `maxAgeMs` defaults to 3600000 (idle grace), `sweepEnabled` defaults true |
+| `other.pwsh7Link` | When absent follows companion detection; saved boolean wins |
+| `disk` | Read-only ownership report; `status.includeRepository` false and `status.maxEntries` 5000 by default; the `retention` block is a validated contract only (no eviction in this release) |
 
-The bundle declares four independently toggled components. On first installation, the first two are enabled by default:
+`disk.status.*` and the reserved `disk.retention.*` keys are YAML-only. See [Disk and cache](disk-and-cache.md) for
+the resource inventory, the read-only `dsh-ops disk status` report and what it deliberately never scans.
 
-| Row `name` | Component | Default |
-| --- | --- | --- |
-| `dsh-ops/shell` | Terminal and shell | On |
-| `dsh-ops/file` | Rust file tools | On |
-| `dsh-ops/background` | Background tasks | Off |
-| `dsh-ops/ptc` | Native PTC batches | Off |
+The page uses native Switch controls. Built-in cards start collapsed. Disabling a card greys its
+switches without erasing saved values. Standard/PTC/Cordis have `residentTools` (default true),
+independent of dynamic loading. Minimal retains its intentionally non-resident default; an explicit
+consumer for `minimal` can select a different profile. Bash has an independent publication switch.
+File replacement and Windows host-PowerShell hiding are independent.
 
----
+Bundle switches apply an AND gate and preserve each consumer's saved intent. Companion linkage
+forces every row-managed `hidePwsh` off, keeping the host shell available to `dsh-win-pwsh7`.
+An unsaved linkage means untouched: saving another switch never turns detection into a stored
+value, while flipping the link itself is always written (on or off). Detection reads the profile
+that installed this package, so it also answers in the host process, where no `DSH_PROFILE_DIR` is
+set.
+These are publication choices, not filesystem permissions. No switch bypasses host authorization.
 
-## 🔴 Which key belongs to which component
+Saves use exact nested paths and the revision read by the page. Unchanged fields are not written;
+conflicts retain the draft. Reset reloads current saved values. The runtime status section shows
+actual host platform, managed/Git Bash, PowerShell and companion facts. Installation/removal needs
+a preview and explicit execution; configuration saves do not deploy binaries or alter PATH.
 
-The table below gives the **owning component** for each key. Putting a key on a row that does not own it is rejected by configuration validation, which names the offending key.
-
-| Key | Type | Default | Owning component |
-| --- | --- | --- | --- |
-| `configUpdateVersion` | non-negative integer | `0` | any (migration marker) |
-| `serverName` | string, `[A-Za-z0-9_-]{1,32}` | `fastctx` | legacy compatibility |
-| `binaryPath` | string path | — | background / ptc |
-| `bashPath` | string path | — | shell |
-| `enableShellTools` | boolean | `true` | background |
-| `publishBashTool` | boolean | `true` | shell |
-| `promptPolicy` | boolean | `true` | all |
-| `extraGuidance` | string | empty | all |
-| `toolCallTimeoutMs` | positive integer (ms) | `300000` | background / file |
-| `required` | boolean | `false` | all |
-| `shellPolicy` | `advise` \| `deny-host-shell` | `advise` | shell |
-| `deniedHostTools` | string array | `[pwsh, bash, pwsh_persistent]` | shell |
-| `allowSystemShellFallback` | boolean | `false` | shell |
-
----
-
-## Examples
-
-The `dsh-ops/shell` row:
-
-```yaml
-config:
-  promptPolicy: true
-  publishBashTool: true
-  shellPolicy: advise
-  allowSystemShellFallback: false
-  # bashPath: 'C:\tools\bash.exe'   # honoured in danger-full-access only; see bashPath below
-```
-
-The `dsh-ops/background` row (its market row is disabled by default):
+## Explicit custom consumers
 
 ```yaml
-config:
-  promptPolicy: true
-  enableShellTools: true
-  required: false
-  toolCallTimeoutMs: 300000
-  # binaryPath: 'C:\tools\fastctx.exe'
-  # Managed update metadata; do not remove after the first startup self-check
-  # configUpdateVersion: 1
+presets:
+  acme-chat:
+    enabled: true
+    files: true
+    residentTools: true
+    residentNames: [read_files, stat]
+    shell: false
+    hidePwsh: false
+    discovery: true
+    allowedTools: [diff, grep]
+    alwaysLoaded: [diff]
+    replaceOfficial: false
+    promptPolicy: true
+    extraGuidance: Use bounded repository inspection.
+    externalTools: [acme_lookup]
+    externalAlwaysLoaded: []
+    externalDisabled: []
 ```
 
----
+The map key is the exact preset id; do not repeat `preset` inside it. Custom records appear on the
+same native-switch page, with enabled/files/resident/Shell/hiding/discovery/guidance switches. The
+host descriptor also accepts the detailed validated options; name lists and executor paths can be
+saved in YAML. Dot-containing ids are single path segments, not interpreted as nested objects.
+Unlisted presets remain unchanged. An explicit binding for a built-in id overrides its default
+consumer in either mount order. `enabled: false` keeps that explicit override disabled instead of
+falling back to the built-in surface; scoped diagnostics remain accessible.
 
-## Key by key
+| Option | Default / meaning |
+| --- | --- |
+| `profile` | `native`; shortcuts are `native`, `ptc`, `discovery`, `shell` |
+| `files` | true for native/PTC, false for discovery/shell; controls resident built-in file surface |
+| `residentTools` | true; false removes baseline residency, not explicit discovery selections |
+| `residentNames` | Native raw names: `inspect_local_file`, `glob`, `grep`, `read_files`, `result`; exact list may be empty |
+| `shell` | false except shell profile; authorized resident Bash, never a discovery choice |
+| `hidePwsh` | defaults to `replaceOfficial && shell`; independent Windows shell hiding |
+| `presentation` | native except PTC profile; selects projection, never changes host presentation |
+| `discovery` | true except shell profile; false removes the selector/SDK loader, not explicit startup selections |
+| `allowedTools` | all supported loadable tools when discovery is enabled, otherwise empty |
+| `alwaysLoaded` | empty; must be allowed; separate from the Native residentNames profile |
+| `replaceOfficial` | false; replaces only ready, admitted file counterparts; conditional official tools may remain visible |
+| `promptPolicy` | true; guidance names only actually published tools |
+| `extraGuidance` | empty; Native-only guidance, rejected in PTC |
+| `externalTools` / `externalAlwaysLoaded` / `externalDisabled` | empty; explicit external allow/startup/deny lists, disabled wins |
+| `binaryPath` / `bashPath` | managed worker/Shell resolution unless explicitly selected |
+| `required` | false; missing required worker fails activation |
+| `denyCredentialReads` | true; Native-only override, PTC rejects overrides and retains its boundary |
+| `downloadGuard.template` | empty; inert until set. A suggested command with standalone unquoted `{url}` (required) and optional `{file}` arguments; never executed automatically |
+| `downloadGuard.shell` | `bash` by default; `pwsh` quotes suggested arguments for PowerShell. See [download guard](download-guard.md) for the opt-in row section and detection limits |
+| `allowSystemShellFallback` | false; retained for compatibility, never enables implicit Windows Bash fallback; use explicit `bashPath` |
 
-- `enableShellTools`: deployment switch for the background component; enabling it still requires session `danger-full-access` to publish the four background tools. The file component never publishes command tools.
-- `publishBashTool`: publish `ops_bash` using current session policy; restricted modes require the host sandbox, full access uses the host subprocess service.
-- `promptPolicy`: whether to inject the component's runtime guidance; use `extraGuidance` to append instructions.
-- `toolCallTimeoutMs`: FastCtx RPC wait timeout; it does not mean server-side work has terminated. Ceiling `2147483647`.
-- `required`: whether to reject activation when the runtime is unavailable.
-- `shellPolicy`: defaults to `advise`; `deny-host-shell` rejects host shells in `deniedHostTools` (default `[pwsh, bash, pwsh_persistent]`). This also disables third-layer pwsh; enable cautiously.
-- `allowSystemShellFallback`: defaults to `false`. Without a bundled/provisioned bash, do not discover system PATH or well-known installations; background commands cannot bypass this through FastCtx discovery either. Explicit `true` opts into an unpinned system bash that the operator must trust and maintain. Explicit `bashPath` is a separate operator selection, not an automatic fallback. See the update configuration modification area in the [usage guide](usage.md) for the first-start migration.
-- `shellPolicy` is independent: `deny-host-shell` masks/refuses host tools; disabling fallback constrains the plugin's bash resolver, not the host's own `pwsh`, and is not a filesystem sandbox.
-- `binaryPath` / `bashPath`: optional explicit paths; unavailable paths cause an error rather than silently switching executors. Usually no configuration is needed.
-- `bashPath` **works only in `danger-full-access`.** In read-only and workspace-write, `ops_bash` runs only the pinned MSYS whose IPC compatibility proxies were verified (the bundled payload or `dsh-ops provision-shells --bash`); any other `msys-2.0.dll`, including your own Git for Windows, returns `EXECUTOR_UNAVAILABLE` by design and is never run unconfined. Do not point `bashPath` at your own Git Bash to work around a restricted-mode problem. Check a selection with `dsh-ops ladder --config <file>`, which reports `restricted: yes/no` for the resolved bash. See [Troubleshooting](troubleshooting.md#ops_bash-cannot-run-a-custom-bashpath-or-git-for-windows-in-restricted-modes).
-- `deniedHostTools`: the host tool names refused by the `deny-host-shell` policy.
-- `serverName`: the legacy FastCtx server identity, kept for existing deployment rows; server instructions are no longer published as a separate prompt section.
-- `configUpdateVersion`: completion marker for the one-time configuration migration. Do not remove it, or the self-check runs again.
+In 0.5, enabling official-tool replacement does not guarantee that a conditional official tool disappears from the model's tool table. When the OPS counterpart has conditional admission, OPS keeps the official registration visible and guards its dispatch only when the same captured step toolSet admits the counterpart and the consumer still has current authority. An absent, revoked or not-yet-ready counterpart cannot disable the official tool as well. Safe unconditional resident replacements may still use host restrictions. OPS never wraps official definitions or hides tools from inside admission conditions or prompt assembly.
 
----
+`shell: false` retains explicit `bashPath`, `allowSystemShellFallback` and `hidePwsh` intent,
+but does not publish Bash or hide the host shell. Re-enabling Shell applies those saved choices.
+The custom PTC card locks `files` on and explains that `residentTools` controls startup APIs.
+PTC requires `files: true`, actual run_code-only host
+presentation and the host PTC runtime. PTC does not accept `residentNames` or external Native
+providers as typed SDKs. [Third-party PTC provider registration is not supported](external-provider.md).
 
-## Prompt registration
+Standalone `integration({ preset, ...options })` uses the same options and assembler but belongs
+to its own mounting plugin; unrelated bundle global switches do not control it. Avoid duplicate
+bindings for the same id/scope. See [scope/lifetime restrictions](integration-api.md#lifecycle-and-ownership).
 
-Prompts are registered as independent runtime sections, **not written to AGENTS.md**: shell OFF withdraws bash/pwsh routing; file OFF withdraws native file guidance; background OFF withdraws background tools and owned-job guidance. The file component uses its independent Rust worker; FastCtx is retained only by the disabled background component. Four native file tools and `ops_bash` are added by default; duplicate foreground `ops_run` is not published. These changes reduce fixed declaration costs. The Minimal preset overrides additional system sections; PTC mode calls the underlying tools through the SDK with unchanged permission gates.
+## Built-in advanced configuration
 
----
+Built-in sections retain validated worker/Shell settings (`binaryPath`, `required`, `bashPath`,
+`denyCredentialReads`, `promptPolicy`, `extraGuidance`, `allowSystemShellFallback`) and the
+`publishBashTool` alias for `bash`. `ptc.allowedTools` / `ptc.alwaysLoaded` control typed SDK APIs;
+`discovery.allowedTools` / `discovery.alwaysLoaded` configure the built-in Native pool. Use
+`presets.<id>` for an exact fully customized profile rather than adding preset-name exceptions.
+`resultCache` is a YAML section: the default sweep only reclaims roots with no snapshot data left
+(empty roots, or scope directories holding just the lock). The aggregate root/byte budgets default
+to 0 and mark over-budget roots as blocked in the report; the sweep never deletes a root that still
+holds snapshot data. `dsh-ops result-cache status|reclaim [--apply]` reports and runs the same
+bounded pass.
+
+Host subprocess spill retention is bounded by three more built-in keys. `spillRetentionDays`
+(default 30; `0` reports only and never deletes) is the window applied to the mtime of a spilled
+file. `spillTotalBudgetMiB` (default 256; `0` disables the budget) caps the total retained bytes,
+evicting the oldest first. `spillSweepEnabled` (default true) controls the automatic pass on
+component activation and every 256 settlements. Only paths recorded at a settlement in
+`<DSH_HOME>/ops-spill-ledger.jsonl` are eligible, at most 64 files are removed per pass, and the
+host's `dsh-subprocess-*` directories are never removed. Inspect and sweep from the CLI with
+`dsh-ops bash-runtime spill-report` (see [usage](usage.md)).
+
+The bundle's `discovery.enabled` controls built-in **Native** dynamic entry publication, not the
+PTC SDK loader. PTC loading follows `ptc.dynamicTools` and `global.dynamicTools`. The Native keys
+are `maxResults` (1–5, default 3), `allowedTools`, `alwaysLoaded`, `binaryPath`, `required` and
+`denyCredentialReads`; alwaysLoaded must be allowed. Per-preset dynamic switches and the global
+switch must also be enabled for the selector. Native and PTC selectors do not execute actions;
+activation takes effect on the next model step.
+
+## Credential and execution boundaries
+
+The credential fence protects every direction: a denied path cannot be used as a read source or
+as a write, copy/move destination or removal target. The historical name `denyCredentialReads`
+therefore covers more than reads. It defaults on even in danger-full-access. Refusals
+report `CREDENTIAL_DENIED`, no effect and no retry, and do not disclose denied paths or parents.
+`DSH_OPS_DENY_READ` can widen the fence; disabling the Native override is an explicit operator
+choice for that consumer, not an authorization grant.
+
+`DSH_OPS_EXEC_ROOT` names the parent directory of the per-call Windows Niubash execution tree
+(default: the OS temporary directory). Point it at an antivirus allow-list location or a specific
+volume to keep hardlink cloning on the payload's volume; a cross-volume root still works through the
+copy fallback recorded in the execution receipt. The root must not be inside the payload.
+`NIUBASH_VERIFY=deep` restores the full per-call payload re-hash; the default per-call check is
+stat-only (path set, sizes, directories, read-only seal, link counts).
+
+On Windows restricted Bash requires the pinned MSYS and verified private IPC proxies. Unsupported
+custom Bash returns `EXECUTOR_UNAVAILABLE`; never bypass confinement or change shells as a repair.
+POSIX Bash uses the host executable and host sandbox. Worker and Shell explicit selections never
+silently substitute a different executable. PowerShell installation is a separate host action;
+OPS does not bundle or override the host PowerShell executable.
+
+## Capture and sidebar
+
+`panel.enabled` starts/stops capture. `capture` defaults true inside an enabled panel; explicit
+legacy false remains off. `textLimit` is 64–100000 (default 2000), `maxSessionBytes` is
+65536–268435456 (default 8388608). Capture writes only to the session workspace's `.dsh-ops/panel/`,
+never the real DSH home. Reports can contain conversation/tool text; ignore that directory in Git.
+Stopping cancels queued I/O and waits for issued work, retaining recoverable NDJSON rather than
+starting a final fold. `tui` accepts `maxSessions`, `maxActive`, `recentLimit` only; it grants no tool
+execution. See [sidebar limits](tui-panel.md#limits).
+
+## Migration
+
+The bundle no longer inserts separate `mode-*`, `discovery`, `compat`, `panel`, `tui`, `shell`,
+`file`, `ptc`, `hide-official` or `background` rows. Delete saved overrides after migrating their
+values to the single row; OPS never rewrites the profile automatically. Retained legacy component
+modules warn and stay inert under the merged bundle. `dsh-ops/compat` was removed with the old
+compatibility switch; use `hideOfficialTools: false` / `replaceOfficial: false` and `hidePwsh: false`.
+
+Old FastCtx keys remain type-checked for saved configuration migration only; they do not enable an
+old executor. `configUpdateVersion` is a migration marker, not a capability switch. `shellPolicy`,
+`deniedHostTools`, `replaceTools` and related old hiding keys do not belong to current consumers.
 
 ## See also
 
-- [Usage](usage.md) — install, update, remove, CLI
-- [Component reference](component-reference.md) — components and tools
-- [Troubleshooting](troubleshooting.md) — errors and diagnosis
+- [Integration API](integration-api.md), [external providers](external-provider.md), [diagnostics](diagnostics.md)
+- [Internal architecture](internal-architecture.md), [usage](usage.md), [troubleshooting](troubleshooting.md)

@@ -1,7 +1,8 @@
 /**
- * `dsh-ops uninstall`: the runtime this plugin installed outside the profile, and
- * the FastCtx state it does not own. Plus `dsh-ops ladder`, the same CLI read
- * back through its report.
+ * `dsh-ops uninstall`: what this plugin (and older versions of it) installed
+ * outside the profile, and the leftover FastCtx state it does not own. Plus
+ * `dsh-ops ladder`, the same CLI read back through its report, and the commands
+ * removed with the FastCtx background component.
  *
  * The suite runs the real CLI as a child process against a throwaway `DSH_HOME`
  * rather than importing it. `bin/dsh-ops.mjs` is a program whose whole contract
@@ -20,14 +21,16 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { resolveConfig } from '../lib/config.js'
-import { renderToolingPolicy } from '../lib/policy.js'
+import { FILE_TOOLS, renderToolingPolicy, publicToolName } from '../lib/policy.js'
 import { resolveShells } from '../lib/shells.js'
 import { PACKAGE_ROOT, TEST_HOME, assert, report, test, withTempDir } from './lib/harness.mjs'
 
 /** The CLI under test. */
 const CLI = path.join(PACKAGE_ROOT, 'bin', 'dsh-ops.mjs')
+const PACKAGE_VERSION = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')).version
 
 /**
  * Run the CLI with one throwaway home and one redirected user home.
@@ -49,9 +52,26 @@ function runCli({ home, user, args, command = 'uninstall', env }) {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' }
 }
 
+await test('profile dry-run returns nonzero for a missing CLI and leaves the profile untouched', async () => {
+  await withTempDir('profile-cli-missing', root => {
+    const directory = path.join(root, 'profiles', 'desktop')
+    fs.mkdirSync(directory, { recursive: true })
+    const manifest = path.join(directory, 'package.json'), before = '{"dsh":{"profile":{"bundles":[]}}}\n'
+    fs.writeFileSync(manifest, before)
+    const missing = path.join(root, 'missing-cli')
+    const result = runCli({ home: root, user: root, command: 'install',
+      args: ['--profile', 'desktop', '--dry-run', '--dsh-cli', missing] })
+    assert.equal(result.status, 1, `${result.stdout}${result.stderr}`)
+    assert.match(result.stderr, /Official CLI not found or not executable/)
+    assert.ok(result.stderr.includes(missing))
+    assert.equal(fs.readFileSync(manifest, 'utf8'), before)
+    assert.deepEqual(fs.readdirSync(directory), ['package.json'])
+  })
+})
+
 /**
- * Seed one home with a managed runtime, a sibling directory that must survive,
- * and FastCtx's own state directory.
+ * Seed one home with the managed runtime an older version provisioned, a sibling
+ * directory that must survive, and the leftover FastCtx state directory.
  * @param {string} home - the `DSH_HOME` to seed.
  * @param {string} user - the user home to seed.
  * @returns {void}
@@ -134,7 +154,7 @@ await test('FastCtx state is reported and survives until --purge-fastctx', async
 
     const reportOnly = runCli({ home, user, args: ['--purge-fastctx'] })
     assert.equal(reportOnly.status, 0, reportOnly.stderr)
-    const reported = /FastCtx user data \(not owned by this plugin\)[\s\S]*?directory: (.*)/u.exec(reportOnly.stdout)?.[1]?.trim()
+    const reported = /FastCtx user data \(not owned by this plugin[^)]*\)[\s\S]*?directory: (.*)/u.exec(reportOnly.stdout)?.[1]?.trim()
     assert.ok(reported !== undefined, `the report names the FastCtx directory:\n${reportOnly.stdout}`)
     assert.ok(
       path.resolve(reported).startsWith(path.resolve(dir)),
@@ -182,6 +202,21 @@ await test('an unknown command still exits 2', () => {
   assert.match(run.stderr, /unknown command/u)
 })
 
+await test('the commands removed with the FastCtx background component say what replaces them', () => {
+  for (const [command, replacement] of [['resolve', /dsh-ops ladder/u], ['status', /status --profile/u], ['build', /build-ptc/u], ['provision', /provision-shells/u]]) {
+    const run = runCli({ home: TEST_HOME, user: TEST_HOME, args: [], command })
+    assert.equal(run.status, 2, `${command}: ${run.stderr}`)
+    assert.match(run.stderr, /was removed together with the FastCtx background component/u)
+    assert.match(run.stderr, replacement)
+    assert.equal(run.stderr.includes('unknown command'), false, `${command} is explained, not reported as unknown`)
+  }
+  // The profile form of `status` is a different command and keeps working through the profile manager.
+  const help = runCli({ home: TEST_HOME, user: TEST_HOME, args: [], command: 'help' })
+  assert.equal(help.status, 0)
+  for (const removed of ['dsh-ops resolve', 'dsh-ops build [', 'dsh-ops provision [']) assert.equal(help.stdout.includes(removed), false, `help no longer lists ${removed}`)
+  assert.match(help.stdout, /dsh-ops status --profile/u)
+})
+
 // ---------------------------------------------------------------------------
 // `dsh-ops ladder`: the resolution report and the rungs the prompt renders
 // ---------------------------------------------------------------------------
@@ -201,8 +236,11 @@ function writeConfig(dir, config) {
 /**
  * Make one file that exists, so a config path can point at something.
  *
- * Nothing spawns it: `ladder` never probes, which is exactly why a text file is
- * enough to stand in for a runtime here.
+ * Nothing spawns it: `ladder` never probes, and an explicit worker path is not
+ * provenance-checked. It *is* checked for the execute bit on POSIX, though
+ * (report L12), so a stand-in for a worker that has to **resolve** comes from
+ * `seedExecutable` below instead — a plain text file resolves to
+ * `{resolved: false, error: '... is not executable (mode 0644)'}`.
  * @param {string} file - the path to create.
  * @param {string} [contents] - the bytes.
  * @returns {string} the created path.
@@ -210,6 +248,24 @@ function writeConfig(dir, config) {
 function seedFile(file, contents = 'not an executable\n') {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, contents)
+  return file
+}
+
+/**
+ * Make one *executable* file, for a config path that has to resolve.
+ *
+ * `resolveWorker` refuses a non-executable explicit `binaryPath` by mode on
+ * POSIX, and the ladder reports that refusal as `resolved: false`, which turns
+ * every file-tool expectation below into a failure. Windows has no execute bit,
+ * so the resolver skips the check there — which is why this matters only on
+ * Linux and macOS.
+ * @param {string} file - the path to create.
+ * @returns {string} the created path.
+ */
+function seedExecutable(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, 'worker stand-in\n')
+  fs.chmodSync(file, 0o755)
   return file
 }
 
@@ -235,12 +291,12 @@ function assertLadder(report_) {
   const { levels, rungs } = report_
   assert.deepEqual(rungs, [], 'the retired numbered ladder is empty')
   const published = [
-    ...(levels.fastctx ? ['glob', 'grep', 'inspect_local_file', 'replace'].map(name => `ops_${name}`) : []),
+    ...(levels.files ? FILE_TOOLS.map(publicToolName) : []),
     ...(levels.bash ? ['ops_bash'] : []),
     ...(levels.pwsh ? ['pwsh'] : []),
   ]
   assert.equal(report_.policy, renderToolingPolicy({ published, extraGuidance: '' }))
-  assert.equal(report_.policy.includes('| General commands'), levels.bash)
+  assert.equal(report_.policy.split('\n').includes('| General Bash commands / builds / git / pipelines / scripts | ops_bash |'), levels.bash)
   assert.equal(report_.policy.includes('bundled PowerShell 7'), false, 'resolution-only CLI must not claim a mounted pwsh overlay')
 }
 
@@ -250,7 +306,7 @@ await test('ladder --json has a stable shape and lists exactly the rungs the ren
     const user = path.join(dir, 'user')
     fs.mkdirSync(home, { recursive: true })
     fs.mkdirSync(user, { recursive: true })
-    const runtime = seedFile(path.join(dir, 'fastctx-stub'))
+    const runtime = seedExecutable(path.join(dir, 'worker-stub'))
     const bash = seedFile(path.join(dir, 'bash-stub'))
     const args = ['--json', '--config', writeConfig(dir, { binaryPath: runtime, bashPath: bash })]
 
@@ -258,12 +314,12 @@ await test('ladder --json has a stable shape and lists exactly the rungs the ren
     assert.equal(run.status, 0, `expected a report, got ${run.status}: ${run.stderr}`)
     const parsed = JSON.parse(run.stdout)
 
-    assert.deepEqual(Object.keys(parsed), ['fastctx', 'shells', 'levels', 'rungs', 'policy'])
-    assert.deepEqual(Object.keys(parsed.fastctx), ['resolved', 'executable', 'source', 'error', 'tried'])
+    assert.deepEqual(Object.keys(parsed), ['worker', 'shells', 'bashIpc', 'levels', 'rungs', 'policy'])
+    assert.deepEqual(Object.keys(parsed.worker), ['resolved', 'executable', 'source', 'error'])
     assert.deepEqual(Object.keys(parsed.shells), ['bash', 'pwsh'])
     for (const kind of ['bash', 'pwsh']) {
       assert.deepEqual(Object.keys(parsed.shells[kind]),
-        ['available', 'executable', 'source', 'detail', ...(kind === 'bash' ? ['restricted'] : [])])
+        ['available', 'executable', 'source', 'detail', ...(kind === 'bash' ? ['restricted', 'integrity'] : [])])
       assert.equal(
         parsed.shells[kind].executable === null,
         parsed.shells[kind].available === false,
@@ -271,13 +327,17 @@ await test('ladder --json has a stable shape and lists exactly the rungs the ren
       )
       assert.equal(typeof parsed.shells[kind].detail, 'string')
     }
-    assert.deepEqual(Object.keys(parsed.levels), ['fastctx', 'run', 'bash', 'pwsh'])
+    assert.deepEqual(Object.keys(parsed.levels), ['files', 'bash', 'pwsh'])
+    assert.deepEqual(Object.keys(parsed.bashIpc),
+      ['root', 'current', 'generations', 'entries', 'totalBytes', 'reclaimableBytes'])
+    assert.equal(parsed.bashIpc.generations, 0, 'a fresh home has no private Bash runtime')
+    assert.equal(parsed.bashIpc.totalBytes, 0)
 
-    assert.equal(parsed.fastctx.resolved, true)
-    assert.equal(parsed.fastctx.executable, runtime, 'the configured path is reported verbatim')
-    assert.equal(parsed.fastctx.source, 'config.binaryPath')
-    assert.equal(parsed.fastctx.error, null)
-    assert.equal(parsed.levels.fastctx, true)
+    assert.equal(parsed.worker.resolved, true)
+    assert.equal(parsed.worker.executable, runtime, 'the configured path is reported verbatim')
+    assert.equal(parsed.worker.source, 'config.binaryPath')
+    assert.equal(parsed.worker.error, null)
+    assert.equal(parsed.levels.files, true)
     assert.equal(parsed.shells.bash.available, true, `the configured bash resolved: ${parsed.shells.bash.detail}`)
     assert.equal(parsed.levels.bash, true)
     // A configured bash without the pinned MSYS beside it cannot run in restricted modes (#42).
@@ -294,7 +354,32 @@ await test('ladder --json has a stable shape and lists exactly the rungs the ren
     assert.match(human.stdout, /custom bashPath works only in full access/u)
     assert.deepEqual(printedRungs(human.stdout), parsed.rungs)
     assert.ok(human.stdout.includes(runtime), 'the report names the executable')
-    assert.equal(human.stdout.includes('MCP handshake'), false, 'ladder never handshakes')
+    assert.match(human.stdout, /^Native worker \(file tools\)$/mu)
+    assert.match(human.stdout, /^Bash IPC runtime cache/mu)
+    assert.equal(human.stdout.includes('FastCtx'), false, 'the ladder no longer reports a FastCtx runtime')
+
+    // A worker the configuration names but that does not exist is a missing file rung, with the resolver's reason.
+    const missing = runCli({ home, user, args: ['--json', '--config', writeConfig(dir, { binaryPath: path.join(dir, 'absent-worker') })], command: 'ladder' })
+    assert.equal(missing.status, 0, missing.stderr)
+    const unresolved = JSON.parse(missing.stdout)
+    assert.equal(unresolved.worker.resolved, false)
+    assert.equal(unresolved.worker.executable, null)
+    assert.match(unresolved.worker.error, /Native worker unavailable/u)
+    assert.equal(unresolved.levels.files, false)
+    assertLadder(unresolved)
+
+    // A worker the configuration names, that exists, but that cannot be executed is refused by
+    // mode on POSIX — and refused by name, so the report says what to fix. Windows has no
+    // execute bit, so this host cannot answer the case and does not pretend to.
+    if (process.platform !== 'win32') {
+      const refusedRun = runCli({ home, user, args: ['--json', '--config', writeConfig(dir, { binaryPath: seedFile(path.join(dir, 'worker-0644')) })], command: 'ladder' })
+      assert.equal(refusedRun.status, 0, refusedRun.stderr)
+      const refused = JSON.parse(refusedRun.stdout)
+      assert.equal(refused.worker.resolved, false)
+      assert.match(refused.worker.error, /is not executable \(mode 0[0-7]{3}\)/u)
+      assert.equal(refused.levels.files, false)
+      assertLadder(refused)
+    }
   })
 })
 
@@ -304,7 +389,7 @@ await test('a shell the deployment does not have is reported as missing, with th
     const user = path.join(dir, 'user')
     fs.mkdirSync(home, { recursive: true })
     fs.mkdirSync(user, { recursive: true })
-    const runtime = seedFile(path.join(dir, 'fastctx-stub'))
+    const runtime = seedFile(path.join(dir, 'worker-stub'))
     // `allowSystemShellFallback: false` is what makes this case host-independent.
     // A machine with a Git for Windows or an msys64 bash at a well-known location
     // would otherwise resolve one, and each side of the comparison would resolve
@@ -334,7 +419,7 @@ await test('a shell the deployment does not have is reported as missing, with th
 
     const resolved = resolveShells(resolveConfig(config), { env })
     for (const kind of ['bash', 'pwsh']) {
-      const { restricted, ...rung } = parsed.shells[kind]
+      const { restricted, integrity, ...rung } = parsed.shells[kind]
       assert.deepEqual(rung, {
         available: resolved[kind].available,
         executable: resolved[kind].file ?? null,
@@ -342,6 +427,7 @@ await test('a shell the deployment does not have is reported as missing, with th
         detail: resolved[kind].detail,
       }, `the report and the resolver disagree about ${kind}`)
       if (kind === 'bash') assert.equal(restricted === null, !resolved.bash.available, 'restricted is reported exactly for a resolved bash')
+      if (kind === 'bash') assert.ok(['complete', 'partial', 'not-applicable'].includes(integrity.status))
       if (resolved[kind].source === 'missing') {
         assert.equal(parsed.shells[kind].executable, null)
         assert.match(human.stdout, /executable: missing/u)
@@ -361,14 +447,14 @@ await test('a rung that is off leaves no ops_bash heading and no numbered gap', 
     const home = path.join(dir, 'home')
     const user = path.join(dir, 'user')
     fs.mkdirSync(home, { recursive: true })
-    const runtime = seedFile(path.join(dir, 'fastctx-stub'))
+    const runtime = seedExecutable(path.join(dir, 'worker-stub'))
     const args = ['--json', '--config', writeConfig(dir, { binaryPath: runtime, publishBashTool: false })]
 
     const run = runCli({ home, user, args, command: 'ladder' })
     assert.equal(run.status, 0, run.stderr)
     const parsed = JSON.parse(run.stdout)
 
-    assert.equal(parsed.levels.fastctx, true)
+    assert.equal(parsed.levels.files, true)
     assert.equal(parsed.levels.bash, false)
     assert.equal(parsed.shells.bash.available, false)
     assert.equal(parsed.shells.bash.source, 'disabled')
@@ -494,7 +580,7 @@ await test('provision-shells --dry-run downloads nothing and writes nothing', as
     assert.ok(run.stdout.includes(pin.url), 'the report names the URL it would fetch')
     assert.ok(run.stdout.includes(pin.sha256), 'the report names the digest it would check')
     assert.match(run.stdout, /\(1\.2 kB\)/u, 'the report names the size it would download')
-    assert.match(run.stdout, new RegExp(home.replace(/\\/g, '\\\\'), 'u'), 'the report names the store it would write')
+    assert.ok(run.stdout.includes(home), 'the report names the literal store it would write')
     // Neither the store nor a scratch download exists: a dry run is a report.
     assert.equal(fs.existsSync(path.join(home, 'dsh-ops')), false)
     assert.deepEqual(fs.readdirSync(home), [])
@@ -529,6 +615,54 @@ await test('provision-shells refuses bytes that do not match the pin, and keeps 
     assert.equal(fs.existsSync(kept), true, `the kept file is really there: ${kept}`)
     assert.equal(sha256Of(kept), sha256Of(asset), 'the kept file is the downloaded one')
     assert.equal(fs.existsSync(path.join(home, 'dsh-ops', 'shells', 'pwsh', '0.0.1')), false, 'nothing was installed')
+  })
+})
+
+await test('a second provision run reclaims the download the first failure kept, and says how many bytes', async () => {
+  const name = 'a second provision run reclaims the download the first failure kept, and says how many bytes'
+  if (skipUnpinnedHost(name)) return
+  await withTempDir('provision-reclaim-kept', (dir) => {
+    const home = path.join(dir, 'home')
+    const user = path.join(dir, 'user')
+    fs.mkdirSync(home, { recursive: true })
+    fs.mkdirSync(user, { recursive: true })
+    // Seed what an earlier failed provision leaves behind: a kept download at the
+    // canonical temporary root and the durable record that owns it.
+    const sha = 'c'.repeat(64)
+    const scratch = path.join(fs.realpathSync.native(os.tmpdir()), 'dsh-ops-pwsh-reclaimseed')
+    fs.mkdirSync(scratch, { recursive: true })
+    fs.writeFileSync(path.join(scratch, 'payload.bin'), Buffer.alloc(2048))
+    const pending = path.join(home, 'dsh-ops', 'pending')
+    fs.mkdirSync(pending, { recursive: true })
+    const record = path.join(pending, 'pwsh-' + sha.slice(0, 12) + '.json')
+    fs.writeFileSync(record, JSON.stringify({
+      version: 1, kind: 'pwsh', pinSha256: sha, scratch, bytes: 2048,
+      reason: 'the downloaded archive did not match the pinned sha256',
+      at: new Date(Date.now() - 8 * 24 * 60 * 60 * 1000).toISOString(),
+    }, null, 2))
+    try {
+      // The same failing provision the retention test above uses: the bytes stay for
+      // diagnosis, while the record seeded eight days ago is outside the age budget.
+      const asset = seedFile(path.join(dir, 'assets', 'forged-pwsh.zip'), 'not the pinned bytes\n')
+      const pin = unreachablePin({ url: new URL('file:///' + asset.replace(/\\/g, '/')).href, sha256: 'b'.repeat(64) })
+      const run = runCli({ home, user, command: 'provision-shells', args: ['--pwsh', '--pin', writePin(dir, pin)] })
+      assert.equal(run.status, 1)
+      assert.match(run.stdout, /reclaimed 1 kept download/u, run.stdout + run.stderr)
+      assert.match(run.stdout, /2\.0 kB/u, 'the report names the bytes it freed')
+      assert.equal(fs.existsSync(scratch), false, 'the registered download is gone')
+      assert.equal(fs.existsSync(record), false, 'its record is gone too')
+    } finally {
+      fs.rmSync(scratch, { recursive: true, force: true })
+      // The failed run above keeps its own download by design; remove the copy this
+      // suite just caused so the throwaway home is the only thing left to clean.
+      const kept = path.join(home, 'dsh-ops', 'pending')
+      for (const entry of fs.existsSync(kept) ? fs.readdirSync(kept) : []) {
+        try {
+          const record = JSON.parse(fs.readFileSync(path.join(kept, entry), 'utf8'))
+          if (typeof record.scratch === 'string') fs.rmSync(record.scratch, { recursive: true, force: true })
+        } catch { /* the record this test seeded is already gone */ }
+      }
+    }
   })
 })
 
@@ -593,14 +727,14 @@ await test('provision-shells installs a pinned zip, prunes the old version, and 
   })
 })
 
-await test('ladder reports the provisioned pwsh rung the store feeds', async () => {
-  if (skipUnpinnedHost('ladder reports the provisioned pwsh rung the store feeds')) return
+await test('ladder leaves PowerShell resolution to the host and preserves legacy copies', async () => {
+  if (skipUnpinnedHost('ladder leaves PowerShell resolution to the host and preserves legacy copies')) return
   await withTempDir('provision-ladder', (dir) => {
     const home = path.join(dir, 'home')
     const user = path.join(dir, 'user')
     fs.mkdirSync(home, { recursive: true })
     const executable = seedFile(path.join(home, 'dsh-ops', 'shells', 'pwsh', '7.6.6', 'bin', 'pwsh.exe'))
-    const runtime = seedFile(path.join(dir, 'fastctx-stub'))
+    const runtime = seedFile(path.join(dir, 'worker-stub'))
     const run = runCli({
       home,
       user,
@@ -609,14 +743,12 @@ await test('ladder reports the provisioned pwsh rung the store feeds', async () 
     })
     assert.equal(run.status, 0, run.stderr)
     const parsed = JSON.parse(run.stdout)
-    assert.deepEqual(parsed.shells.pwsh, {
-      available: true,
-      executable,
-      source: 'provisioned',
-      detail: 'the PowerShell 7 this deployment provisioned from upstream (version 7.6.6), '
-        + 'which the pwsh-sandbox override points at',
-    })
-    assert.equal(parsed.levels.pwsh, true)
+    assert.equal(parsed.shells.pwsh.available, false)
+    assert.equal(parsed.shells.pwsh.source, 'host')
+    assert.equal(parsed.shells.pwsh.executable, null)
+    assert.match(parsed.shells.pwsh.detail, /managed by the host/)
+    assert.equal(fs.existsSync(executable), true)
+    assert.equal(parsed.levels.pwsh, false)
   })
 })
 
@@ -666,6 +798,35 @@ await test('provision-shells fails loud on a pin it cannot honour', async () => 
     assert.equal(otherPlatform.status, 1)
     assert.match(otherPlatform.stderr, /no upstream pin for pwsh on win32-x64/u)
     assert.match(otherPlatform.stderr, /pin table covers win32-arm64/u)
+  })
+})
+
+await test('on POSIX the profile CLI fallback launches dsh, not the Windows cmd wrapper', async () => {
+  if (process.platform === 'win32') return // This fixture exercises a POSIX shell launcher, not cmd.exe.
+  // Reported by @Haoming9527 in review of #81: with no package-based CLI to resolve, the fallback
+  // selected `dsh.cmd` and spawned it through `cmd.exe` — `spawnSync cmd.exe ENOENT` on Linux even
+  // with an executable `dsh` on PATH. This case puts exactly that `dsh` on PATH and asserts it is the
+  // program that ran, so the platform-aware fallback is what makes the call work rather than fail
+  // differently.
+  await withTempDir('install-cli-fallback', (dir) => {
+    const home = path.join(dir, 'home')
+    const user = path.join(dir, 'user')
+    fs.mkdirSync(path.join(home, 'profiles', 'web'), { recursive: true })
+    fs.writeFileSync(path.join(home, 'profiles', 'web', 'package.json'), '{}\n')
+    const bin = path.join(dir, 'bin')
+    fs.mkdirSync(bin, { recursive: true })
+    const marker = path.join(dir, 'called.txt')
+    const cli = path.join(bin, 'dsh')
+    fs.writeFileSync(cli, `#!/bin/sh\nprintf '%s\\n' "$*" > ${JSON.stringify(marker)}\n`)
+    fs.chmodSync(cli, 0o755)
+    const run = spawnSync(process.execPath, [CLI, 'install', '--profile', 'web'], {
+      cwd: PACKAGE_ROOT, encoding: 'utf8', timeout: 60_000,
+      env: { DSH_HOME: home, HOME: user, PATH: bin, DSH_OPS_DSH_CLI: '' },
+    })
+    assert.ok(run.stdout.includes(`Official CLI: ${cli};`), `${run.stdout}${run.stderr}`)
+    assert.equal(fs.existsSync(marker), true, `the POSIX CLI must have been launched: ${run.stdout}${run.stderr}`)
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), `plugin --profile web add dsh-ops@${PACKAGE_VERSION}`)
+    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`)
   })
 })
 

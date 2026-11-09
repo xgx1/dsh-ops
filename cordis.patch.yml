@@ -1,30 +1,72 @@
-# Four independent components. PTC is opt-in, scoped to pure PTC sessions.
-# Legacy shell and file stay enabled; neither is required by the PTC component.
+# One row, named exactly like the package: dsh-client-modules mounts a package's
+# browser half on the row whose specifier is the package name, so this row also
+# carries the Plugins-page configuration for every feature.
+#
+# Each section owns its enable switch and only the keys that feature reads. The
+# data capture and the TUI integration stay off by default. Legacy component modules (mode-*, discovery, panel, tui, shell,
+# file, ptc, hide-official, background) remain exported: a saved override for one
+# of those specifiers still loads its legacy module, it just cannot match this row.
 - insert:
-    - id: dsh-ops-shell
-      name: dsh-ops/shell
+    - id: dsh-ops
+      name: dsh-ops
       config:
-        promptPolicy: true
-        publishBashTool: true
-        shellPolicy: advise
-        allowSystemShellFallback: false
-    - id: dsh-ops-file
-      name: dsh-ops/file
-      config:
-        promptPolicy: true
-        enableShellTools: false
-        required: false
-        toolCallTimeoutMs: 300000
-    - id: dsh-ops-background
-      name: dsh-ops/background
-      disabled: true
-      config:
-        promptPolicy: true
-        enableShellTools: true
-        required: false
-        toolCallTimeoutMs: 300000
-    - id: dsh-ops-ptc
-      name: dsh-ops/ptc
-      disabled: true
-      config:
-        required: false
+        # Four bundle switches (one per preset switch), then each preset; all default on.
+        global:
+          bash: true
+          hidePwsh: true
+          hideOfficialTools: true
+          dynamicTools: true
+        minimal:
+          enabled: true
+          spillRetentionDays: 30
+          spillTotalBudgetMiB: 256
+          spillSweepEnabled: true
+        standard:
+          enabled: true
+          residentTools: true
+          spillRetentionDays: 30
+          spillTotalBudgetMiB: 256
+          spillSweepEnabled: true
+        ptc:
+          enabled: true
+          residentTools: true
+          spillRetentionDays: 30
+          spillTotalBudgetMiB: 256
+          spillSweepEnabled: true
+        cordis:
+          enabled: true
+          residentTools: true
+          spillRetentionDays: 30
+          spillTotalBudgetMiB: 256
+          spillSweepEnabled: true
+        discovery:
+          enabled: true
+        # Inert until template is set; off by default so an install that never
+        # opted in gets no listener at all.
+        download-guard:
+          enabled: false
+          downloadGuard:
+            template: ""
+        # Result-cache retention. The aggregate budgets stay 0 (report only): the default sweep
+        # only reclaims roots whose cache data is already gone. maxAgeMs is the idle grace that
+        # protects another live host sharing the temp directory.
+        resultCache:
+          enabled: true
+          maxRoots: 0
+          maxTotalBytes: 0
+          maxAgeMs: 3600000
+          sweepEnabled: true
+        panel:
+          enabled: false
+        tui:
+          enabled: false
+        # Read-only disk ownership reporting. The retention block is a validated
+        # contract only: this release evicts nothing.
+        disk:
+          status:
+            includeRepository: false
+            maxEntries: 5000
+          retention:
+            enabled: false
+            maxAgeDays: 0
+            maxBytes: 0

@@ -10,16 +10,15 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import {
-  BACKGROUND_TOOLS,
-  FILE_TOOLS,
-  HOST_SHELL_SECTION,
-  IN_PROCESS_TOOLS,
-  SHELL_TOOLS,
+  MODE_SECTION_ORDERS,
   TOOLING_SECTION,
   TOOL_PREFIX,
+  modeSectionName,
   publicToolName,
   renderToolingPolicy,
 } from '../lib/policy.js'
+import { CAPABILITIES, NATIVE_FILE_TOOLS } from '../lib/capabilities/registry.js'
+import { COMPONENTS, componentEnabled, componentEntry } from '../lib/components/defaults.js'
 import { assert, PACKAGE_ROOT, report, test } from './lib/harness.mjs'
 
 const manifestFile = path.join(PACKAGE_ROOT, 'dsh-plugin.json')
@@ -52,58 +51,52 @@ await test('$schema is an absolute URI matching the pinned manifest version', ()
   assert.match(raw.$schema, /dsh-plugin-0\.15\.schema\.json$/)
 })
 
-await test('every declared tool is one the policy actually names', () => {
+await test('declared file tools have routing and other namespaces name owned capabilities', () => {
   const namespaces = raw.contributes['x-tool-namespaces']
   // The policy as a deployment that resolved every rung renders it: a bundled
   // shell is named only when it resolved, and a level left off would hide a
   // declared tool from this check.
   const policy = renderToolingPolicy({
-    enableShellTools: true,
     mounted: true,
-    levels: { fastctx: true, bash: true, pwsh: true },
+    levels: { files: true, bash: true, pwsh: true },
   })
 
-  // Index 0 is the native file namespace. FastCtx is deliberately confined
-  // to the disabled background component at index 1.
+  // Index 0 is the native file namespace.
   const hosted = namespaces[0]
   assert.deepEqual(
     [...hosted.tools].sort(),
-    [...FILE_TOOLS].sort(),
-    'the native namespace declares exactly the four file tools',
+    [...NATIVE_FILE_TOOLS].sort(),
+    'the native namespace declares the owned file tools and Native result projection',
   )
   assert.equal(hosted.transport, 'in-process')
-  assert.deepEqual(
-    [...namespaces[1].tools].sort(),
-    [...BACKGROUND_TOOLS].sort(),
-    'the optional FastCtx namespace is background-only',
-  )
   for (const tool of hosted.tools) {
     assert.ok(policy.includes(publicToolName(tool)), `the policy never names ${publicToolName(tool)}`)
   }
+  // The FastCtx background backend was removed: no namespace may still advertise it.
+  assert.equal(namespaces.some((entry) => entry.serverName === 'fastctx' || entry.transport === 'stdio'), false)
 
-  // Every further namespace is this plugin's own in-process surface, so its
-  // names are checked against `IN_PROCESS_TOOLS` and against the policy, never
-  // against the FastCtx list. Vacuously true while no such entry exists, so the
-  // suite is green before and after that entry lands.
-  for (const [offset, entry] of namespaces.slice(2).entries()) {
-    const index = offset + 2
+  // Additional namespaces describe the shell and scoped PTC/discovery controls.
+  // Static inventory is not the model's current prompt or publication authority.
+  for (const [offset, entry] of namespaces.slice(1).entries()) {
+    const index = offset + 1
     assert.ok(
       Array.isArray(entry.tools) && entry.tools.length > 0,
       `the namespace at index ${index} must declare its tools`,
     )
     for (const tool of entry.tools) {
-      assert.ok(
-        IN_PROCESS_TOOLS.includes(tool),
-        `the namespace at index ${index} declares ${tool}, which the plugin does not register itself`,
-      )
-      assert.ok(policy.includes(publicToolName(tool)), `the policy never names ${publicToolName(tool)}`)
+      assert.ok(CAPABILITIES.some(entry => entry.rawName === tool),
+        `the namespace at index ${index} declares an unknown capability: ${tool}`)
     }
   }
+})
 
-  // The other direction: every tool this plugin registers itself is named
-  // somewhere, so a new in-process tool cannot land without policy text.
-  for (const tool of IN_PROCESS_TOOLS) {
-    assert.ok(policy.includes(publicToolName(tool)), `the policy never names ${publicToolName(tool)}`)
+await test('the namespace inventory covers every owned capability exactly once', () => {
+  const namespaces = raw.contributes['x-tool-namespaces']
+  assert.deepEqual(namespaces.flatMap(entry => entry.tools).sort(), CAPABILITIES.map(entry => entry.rawName).sort())
+  for (const entry of namespaces) {
+    assert.equal(entry.serverName, 'dsh-ops')
+    assert.equal(entry.transport, 'in-process')
+    assert.equal(entry.publicPrefix, TOOL_PREFIX)
   }
 })
 
@@ -119,18 +112,46 @@ await test('the declared namespace documents the upstream names and the public p
   }
 })
 
-await test('the declared prompt sections are the registered ones', () => {
+await test('the declared prompt sections are the mode rows the policy registers', () => {
   const declared = raw.contributes['x-prompt-sections'].map((section) => section.name)
-  assert.deepEqual([...declared].sort(), ['file', 'shell', 'background'].map(name => `${TOOLING_SECTION}:${name}`).sort())
+  const expected = Object.keys(MODE_SECTION_ORDERS).map((suffix) => modeSectionName(suffix))
+  assert.deepEqual([...declared].sort(), [...expected].sort())
+  // The legacy per-component sections are gone: rows publish routing text under
+  // their mode suffix only, and the Minimal row publishes none at all.
+  assert.equal(declared.some((name) => ['file', 'shell', 'ptc'].some((legacy) => name === `${TOOLING_SECTION}:${legacy}`)), false)
+  assert.equal(declared.includes(`${TOOLING_SECTION}:mode-minimal`), false)
+  // The background stub still loads for existing rows but is no longer a declared component.
+  assert.equal(raw.contributes['x-components'].some((component) => component.entry === 'dsh-ops/background'), false)
 })
 
-await test('the manifest license states the composite this repository ships', () => {
-  assert.equal(raw.license, 'MIT AND Apache-2.0')
+await test('the manifest license matches the package and is MIT', () => {
+  assert.equal(raw.license, 'MIT')
   assert.equal(pkg.license, raw.license)
   assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'LICENSE')))
   assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'NOTICE')))
-  assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'vendor', 'fastctx', 'LICENSE-APACHE')))
-  assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'vendor', 'fastctx', 'NOTICE')))
+  // FastCtx's license text and attribution are kept for the earlier releases that shipped it.
+  assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'licenses', 'fastctx', 'LICENSE-APACHE')))
+  assert.ok(fs.existsSync(path.join(PACKAGE_ROOT, 'licenses', 'fastctx', 'NOTICE')))
+  assert.ok(pkg.files.includes('licenses'), 'the license texts ship in the package')
+})
+
+await test('the bundle patch inserts exactly the one row and no removed FastCtx key', async () => {
+  const { parse } = await import('yaml')
+  const { LEGACY_FASTCTX_KEYS } = await import('../lib/config.js')
+  const patch = parse(fs.readFileSync(path.join(PACKAGE_ROOT, pkg.dsh.bundle.patch), 'utf8'))
+  const rows = patch.flatMap((entry) => entry.insert ?? [])
+  assert.deepEqual(rows.map((row) => row.id), ['dsh-ops'])
+  assert.deepEqual(rows.map((row) => row.name), ['dsh-ops'])
+  // The legacy rows remain exported modules; they are not inserted into new profiles.
+  for (const legacy of ['shell', 'file', 'ptc', 'hide-official', 'background']) {
+    assert.equal(rows.some((row) => row.id === `dsh-ops-${legacy}`), false, `${legacy} must not be inserted`)
+    assert.equal(rows.some((row) => row.name === `dsh-ops/${legacy}`), false, `${legacy} specifier must not be inserted`)
+  }
+  for (const row of rows) {
+    for (const key of LEGACY_FASTCTX_KEYS) assert.equal(Object.hasOwn(row.config ?? {}, key), false, `${row.name} still writes ${key}`)
+  }
+  // Every legacy entry stays exported so profiles that still name the old row keep loading.
+  for (const legacy of ['shell', 'file', 'ptc', 'hide-official', 'background']) assert.ok(pkg.exports[`./${legacy}`], legacy)
 })
 
 await test('the declared host entry is the shipped module', () => {
@@ -153,7 +174,7 @@ await test('the card text is translated, not one string repeated across locales'
 
 await test('the card icon is a self-contained PNG with bounded dimensions', () => {
   const icon = fs.readFileSync(path.join(PACKAGE_ROOT, display.icon))
-  assert.equal(display.icon, './icon.png')
+  assert.equal(display.icon, './docs/assets/icon.png')
   assert.deepEqual(icon.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
   assert.equal(icon.toString('ascii', 12, 16), 'IHDR')
   assert.equal(icon.readUInt32BE(16), 256)
@@ -162,8 +183,8 @@ await test('the card icon is a self-contained PNG with bounded dimensions', () =
 })
 
 await test('the icon and all component entries are shipped in the package whitelist', () => {
-  assert.ok(pkg.files.includes('icon.png'))
-  for (const component of ['shell', 'file', 'background', 'ptc']) {
+  assert.ok(pkg.files.includes('docs/assets/icon.png'))
+  for (const component of COMPONENTS) {
     const directory = path.join(PACKAGE_ROOT, 'lib', 'components', component)
     assert.ok(fs.existsSync(path.join(directory, 'index.js')))
     assert.ok(pkg.exports[`./${component}`])
@@ -174,6 +195,24 @@ await test('the icon and all component entries are shipped in the package whitel
     assert.ok(relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), `${component}: icon must stay inside its manifest directory`)
     assert.ok(fs.statSync(iconFile).isFile() && fs.statSync(iconFile).size <= 256 * 1024)
   }
+})
+
+await test('the display manifest declares the one row, enabled by default', async () => {
+  const components = raw.contributes['x-components']
+  assert.deepEqual(components.map((component) => component.id), ['dsh-ops'])
+  assert.equal(components[0].entry, 'dsh-ops')
+  assert.equal(components[0].defaultEnabled, true)
+  assert.ok(Array.isArray(components[0].tools) && components[0].tools.length > 0)
+  for (const component of COMPONENTS) {
+    assert.equal(components.some((entry) => entry.id === `dsh-ops-${component}`), false, `${component} must not be advertised as a row`)
+  }
+  // The per-feature defaults moved into the bundle config, which the host reads as
+  // this row's settings; the display manifest only advertises the row itself.
+  const { parse } = await import('yaml')
+  const patch = parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'cordis.patch.yml'), 'utf8'))
+  const config = patch.flatMap((entry) => entry.insert ?? [])[0].config
+  for (const feature of ['minimal', 'standard', 'ptc', 'cordis', 'discovery']) assert.equal(config[feature].enabled, true, feature)
+  for (const feature of ['panel', 'tui']) assert.equal(config[feature].enabled, false, feature)
 })
 
 report('manifest')

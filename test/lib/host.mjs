@@ -3,10 +3,9 @@
  *
  * Every layer here is the production one: real Cordis `Context` and fiber
  * lifecycle, the harness's own `@deepseek-ai/dsh-tools` registry and
- * `@deepseek-ai/dsh-system-prompt` assembly, real registration scopes, and a
- * real FastCtx executable publishing real tools. Nothing is stubbed, so a
- * passing suite is evidence about the shipped composition rather than about a
- * test double.
+ * `@deepseek-ai/dsh-system-prompt` assembly, and real registration scopes.
+ * Nothing is stubbed, so a passing suite is evidence about the shipped
+ * composition rather than about a test double.
  *
  * @module dsh-ops/test/host
  */
@@ -14,9 +13,20 @@
 import { Context } from '@deepseek-ai/cordis'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { probeBinary, resolveBinary } from '../../lib/binary.js'
 import { TOOL_PREFIX } from '../../lib/policy.js'
-import { PACKAGE_ROOT, TEST_HOME } from './harness.mjs'
+import { PACKAGE_ROOT } from './harness.mjs'
+import { legacyComponent } from './legacy-component.mjs'
+
+/**
+ * The directory service rc.5's `run_code` asks for, over a session's committed cwd.
+ * @param {string} fallback - the directory a session without a committed cwd reports.
+ * @returns {object} the provided service shape.
+ */
+export const workingDirectoryOver = fallback => ({
+  get: (session) => session?.header?.cwd ?? fallback,
+  ensure: async (agent) => agent?.session?.header?.cwd ?? fallback,
+  set: async (_agent, target) => target ?? fallback,
+})
 
 /**
  * Boot a context with the real prompt and tool services installed.
@@ -24,9 +34,11 @@ import { PACKAGE_ROOT, TEST_HOME } from './harness.mjs'
  * @param {boolean} [options.withTools] - install the tool registry (default true).
  * @param {boolean} [options.withSystemPrompt] - install the prompt registry (default true).
  * @param {boolean} [options.keepLogger] - keep Cordis's console logging (default false).
+ * @param {'native'|'ptc'} [options.toolsMode] - deployment presentation mode (default native).
+ * @param {boolean} [options.withWorkingDirectory] - provide the required live directory service (default true).
  * @returns {Promise<{ctx: Context, tools: any, prompt: any}>} the host.
  */
-export async function bootHost({ withTools = true, withSystemPrompt = true, keepLogger = false } = {}) {
+export async function bootHost({ withTools = true, withSystemPrompt = true, keepLogger = false, toolsMode = 'native', withWorkingDirectory = true } = {}) {
   const ctx = new Context()
   if (!keepLogger) {
     // Cordis logs service and plugin activity at info level; a gate that prints
@@ -39,108 +51,37 @@ export async function bootHost({ withTools = true, withSystemPrompt = true, keep
   }
   if (withTools) {
     const ToolRuntime = (await import('@deepseek-ai/dsh-tools')).default
-    await ctx.plugin(ToolRuntime, { mode: 'native' })
+    await ctx.plugin(ToolRuntime, {})
+    const executor = await import(toolsMode === 'ptc'
+      ? '@deepseek-ai/dsh-tool-executor-ptc' : '@deepseek-ai/dsh-tool-executor-native')
+    await ctx.plugin(executor, {})
   }
+  // Each fixture supplies an explicit live-directory provider; missing-service tests opt out.
+  if (withWorkingDirectory) ctx.provide('workingDirectory', workingDirectoryOver(process.cwd()))
   return { ctx, tools: ctx.get('tools'), prompt: ctx.get('systemPrompt') }
 }
 
 /**
- * Load a fresh instance of the plugin module.
+ * Load a fresh instance of the legacy global file component.
  *
+ * The package root now publishes a per-preset mode instead of a global surface
+ * (it is the optional client-carrier row), so these helpers mount the retained
+ * legacy file module: its kernel semantics — global publication, read dedup,
+ * worker lifecycle — are what the shared fixtures below still verify.
+ * The test-only wrapper opts in only during the synchronous apply guard.
  * A fresh module graph per mount keeps module-level state from leaking between
  * scenarios, at the cost of one import per call.
  * @param {string} [tag] - a cache-busting tag.
  * @returns {Promise<{apply: Function, name: string}>} the plugin module.
  */
 export async function loadPlugin(tag = `${Date.now()}-${Math.random()}`) {
-  const file = pathToFileURL(path.join(PACKAGE_ROOT, 'lib', 'index.js')).href
-  return import(`${file}?tag=${tag}`)
+  const file = pathToFileURL(path.join(PACKAGE_ROOT, 'lib', 'components', 'file', 'index.js')).href
+  return legacyComponent(await import(`${file}?tag=${tag}`))
 }
 
 /**
- * The environment a runtime probe runs with.
- *
- * The DSH home is this suite's throwaway one, never the developer's real
- * `~/.dsh`: `test/run.mjs` already injects one per suite, and setting it here as
- * well means a suite invoked directly still probes (and can only write) inside
- * the temporary directory. A probe that read the real home would resolve a
- * runtime the machine happens to have provisioned, which is exactly the
- * difference between a hermetic gate and this machine's own state.
- * @returns {NodeJS.ProcessEnv} the environment to resolve with.
- */
-function probeEnvironment() {
-  return { ...process.env, DSH_HOME: TEST_HOME }
-}
-
-/** The resolution this process already made, so later calls cost nothing. */
-let runtimeResolution
-
-/**
- * Resolve and probe the FastCtx executable without throwing.
- *
- * Every rung the plugin itself uses is searched, in the plugin's own order, and
- * the answer is cached for the process: a suite that resolves once and then
- * calls this from twenty checks probes once, not twenty times. No exception
- * escapes — an unusable environment is an answer, not a crash — so a caller can
- * decide whether to skip, to fail, or to press on.
- *
- * @param {object} [options] - resolution inputs.
- * @param {NodeJS.ProcessEnv} [options.env] - the environment to resolve with.
- * @param {boolean} [options.refresh] - resolve again instead of reusing the cached answer.
- * @returns {{ok: true, file: string, source: string, version: string}
- *   | {ok: false, reason: string, tried: {file: string, source: string, detail: string}[]}} the answer.
- */
-export function tryResolveRuntime({ env = probeEnvironment(), refresh = false } = {}) {
-  if (!refresh && runtimeResolution !== undefined) return runtimeResolution
-  try {
-    const resolved = resolveBinary({ packageRoot: PACKAGE_ROOT, env })
-    const probe = probeBinary(resolved.file, { env })
-    runtimeResolution = probe.ok
-      ? { ok: true, file: resolved.file, source: resolved.source, version: probe.version }
-      : {
-        ok: false,
-        reason: `${resolved.file} is not a working FastCtx build: ${probe.detail}`,
-        tried: resolved.tried,
-      }
-  } catch (error) {
-    runtimeResolution = {
-      ok: false,
-      reason: String(error?.message ?? error),
-      tried: Array.isArray(error?.tried) ? error.tried : [],
-    }
-  }
-  return runtimeResolution
-}
-
-/**
- * Resolve and probe the FastCtx executable the way the plugin does, for suites
- * that drive the tool surface directly.
- *
- * The instruction a missing runtime produces is the whole point of this being a
- * wrapper rather than a bare call: whoever hits it is told the two ways out
- * instead of being handed a search log.
- *
- * @param {object} [options] - resolution inputs, as {@link tryResolveRuntime}.
- * @returns {{file: string, source: string, version: string}} the ready runtime.
- * @throws {Error} when no usable executable exists.
- */
-export function resolveRuntime(options = {}) {
-  const resolved = tryResolveRuntime(options)
-  if (resolved.ok) return { file: resolved.file, source: resolved.source, version: resolved.version }
-  throw new Error(
-    `no usable FastCtx runtime: ${resolved.reason}\n`
-    + '  Build one from the vendored source:\n'
-    + '    cargo build --release --locked --manifest-path vendor/fastctx/Cargo.toml\n'
-    + '  or point the plugin at a build someone else made:\n'
-    + '    DSH_OPS_FASTCTX_BIN=<path to the fastctx executable>\n'
-    + `  searched (${resolved.tried.length}):\n`
-    + resolved.tried.map((candidate) => `    ${candidate.source}: ${candidate.file} (${candidate.detail})`).join('\n'),
-  )
-}
-
-/**
- * Mount the plugin and wait until the FastCtx tools appear (or the deadline
- * passes).
+ * Mount the legacy file component and wait until its tools appear (or the
+ * deadline passes).
  * @param {object} options - mount inputs.
  * @param {Context} options.ctx - the host context.
  * @param {Record<string, unknown>} [options.config] - the plugin row config.
@@ -263,7 +204,7 @@ export async function renderSections(ctx, agent) {
  * @returns {Promise<{value: unknown, text: string, content: {type: string, text?: string}[]}>} the outcome.
  */
 export async function callTool(ctx, name, args, signal = new AbortController().signal, agent) {
-  const definition = ctx.get('tools').get(name)
+  const definition = ctx.get('tools').get(name, agent)
   if (definition === undefined) throw new Error(`tool "${name}" is not registered`)
   const value = await definition.execute(args, { callId: 'test', name, arguments: args, signal, agent: agent ?? { session: { id: 'file-call', header: { cwd: process.cwd() } } } })
   const content = definition.output.render(args, value)
